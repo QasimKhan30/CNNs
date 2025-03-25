@@ -2,13 +2,29 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 HOMEWORK_DIR = Path(__file__).resolve().parent
 INPUT_MEAN = [0.2788, 0.2657, 0.2629]
 INPUT_STD = [0.2064, 0.1944, 0.2252]
 
+class ClassificationLoss(nn.Module):
+    def forward(self, logits: torch.Tensor, target: torch.LongTensor) -> torch.Tensor:
+        """
+        Multi-class classification loss
+        Hint: simple one-liner
+
+        Args:
+            logits: tensor (b, c) logits, where c is the number of classes
+            target: tensor (b,) labels
+
+        Returns:
+            tensor, scalar loss
+        """
+        return nn.functional.cross_entropy(logits,target)
 
 class Classifier(nn.Module):
+
     def __init__(
         self,
         in_channels: int = 3,
@@ -26,8 +42,71 @@ class Classifier(nn.Module):
         self.register_buffer("input_mean", torch.as_tensor(INPUT_MEAN))
         self.register_buffer("input_std", torch.as_tensor(INPUT_STD))
 
-        # TODO: implement
-        pass
+        """
+        Dimensions through each layer
+        
+        """
+        
+        """
+        Increasing the number of channels afther the first layer for each convolution increases the
+        computational cost of the convolution
+        
+        
+        
+        You should only really increase output channels if you stride (increase by striding factor).
+        
+        This will keep computation cost constant
+        cost is almost spread out evenly between all layers
+        
+        Width and height after striding will be divided by the stride and then input and output channels
+        will be multipied by stride so it cancels out
+        """
+
+        cnn_layers = [
+            
+            # First Convolutional layer
+            # Input Dimensions: (B,3,64,64)
+            nn.Conv2d(in_channels, 32, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),  # 64 -> 32
+            # Dimensions after MaxPool: (B,32,32,32)
+
+            # Second Convolutional layer
+            # Input Dimensions: (B,32,32,32)
+            nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),  # 32 -> 16
+            # Dimensions after MaxPool: (B,64,16,16)
+
+            # Third Convolutional layer
+            # Input Dimensions: (B,64,16,16)
+            nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),  # 16 -> 8
+            # Dimensions after MaxPool: (B,128,8,8)
+            
+            # Fourth Convolutional layer
+            # Input Dimensions: (B,128,8,8)
+            nn.Conv2d(128, 256, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),  # 8 -> 4
+            # Dimensions after MaxPool: (B,256,4,4)
+            nn.Dropout2d(0.4),
+            
+            # Flattened dimensions = (256 * 4 * 4)
+            nn.Flatten(),
+            
+            # Map the 4096 (256 * 4 * 4) features to the number of classes
+            nn.Linear(4096, num_classes)
+            
+            # We will be left with a set of logits which represent the scores for each class
+        ]
+        
+        self.network = nn.Sequential(*cnn_layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -37,13 +116,13 @@ class Classifier(nn.Module):
         Returns:
             tensor (b, num_classes) logits
         """
-        # optional: normalizes the input
+        # optional: normalizes the input        
         z = (x - self.input_mean[None, :, None, None]) / self.input_std[None, :, None, None]
 
-        # TODO: replace with actual forward pass
-        logits = torch.randn(x.size(0), 6)
+        logits = self.network(z)
 
         return logits
+        
 
     def predict(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -60,7 +139,8 @@ class Classifier(nn.Module):
         return self(x).argmax(dim=1)
 
 
-class Detector(torch.nn.Module):
+
+class Detector(nn.Module):
     def __init__(
         self,
         in_channels: int = 3,
@@ -77,10 +157,67 @@ class Detector(torch.nn.Module):
 
         self.register_buffer("input_mean", torch.as_tensor(INPUT_MEAN))
         self.register_buffer("input_std", torch.as_tensor(INPUT_STD))
+        
+        
+        # Encoding section
+        
+        # Strided conv layer 1
+        self.down1 = nn.Sequential(
+            nn.Conv2d(in_channels, 16, kernel_size=3, stride=2, padding=1),  # (B,16,H/2,W/2)
+            nn.BatchNorm2d(16),
+            nn.ReLU(inplace=True)
+        )
+        # Strided conv layer 2
+        self.down2 = nn.Sequential(
+            nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1),           # (B,32,H/4,W/4)
+            nn.BatchNorm2d(32),
+            nn.ReLU(inplace=True)
+        )
+        # Strided conv layer 3
+        self.down3 = nn.Sequential(
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),           # (B,64,H/8,W/8)
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True)
+        )
+        
+        # Skip connections - Increases channels so that it can be used in the decoding section (matches channels of decoding layers)
+        self.skip2 = nn.Conv2d(32, 64, kernel_size=1)  # transforms d2 (B,32,H/4,W/4) -> (B,64,H/4,W/4)
+        self.skip1 = nn.Conv2d(16, 32, kernel_size=1)  # transforms d1 (B,16,H/2,W/2) -> (B,32,H/2,W/2)
+        
+        # Bottleneck / end of downsampling
+        self.bottleneck = nn.Sequential(
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),                     # (B,128,H/8,W/8)
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True)
+        )
+        
+        # Decoding Section
 
-        # TODO: implement
-        pass
-
+        # Up conv layer 1
+        self.up1 = nn.Sequential(
+            nn.ConvTranspose2d(128, 64, kernel_size=3, stride=2, padding=1, output_padding=1),  # (B,64,H/4,W/4)
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True)
+        )
+        
+        # Up conv layer 2
+        self.up2 = nn.Sequential(
+            nn.ConvTranspose2d(64, 32, kernel_size=3, stride=2, padding=1, output_padding=1),   # (B,32,H/2,W/2)
+            nn.BatchNorm2d(32),
+            nn.ReLU(inplace=True)
+        )
+        
+        # Up conv layer 3
+        self.up3 = nn.Sequential(
+            nn.ConvTranspose2d(32, 16, kernel_size=3, stride=2, padding=1, output_padding=1),   # (B,16,H,W)
+            nn.BatchNorm2d(16),
+            nn.ReLU(inplace=True)
+        )
+        
+        # Heads
+        self.seg_head = nn.Conv2d(16, num_classes, kernel_size=1)
+        self.depth_head = nn.Conv2d(16, 1, kernel_size=1)
+    
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Used in training, takes an image and returns raw logits and raw depth.
@@ -96,12 +233,35 @@ class Detector(torch.nn.Module):
         """
         # optional: normalizes the input
         z = (x - self.input_mean[None, :, None, None]) / self.input_std[None, :, None, None]
+        
+        # Encoder:
+        d1 = self.down1(z)   # (B,16,H/2,W/2)
+        d2 = self.down2(d1)  # (B,32,H/4,W/4)
+        d3 = self.down3(d2)  # (B,64,H/8,W/8)
+        b = self.bottleneck(d3)  # (B,128,H/8,W/8)
+        
+        # Decoder with skip connections:
+        
+        # Up1: (B,128,H/8,W/8) -> (B,64,H/4,W/4)
+        u1 = self.up1(b)     # (B,64,H/4,W/4)
+        skip2 = self.skip2(d2)  # (B,64,H/4,W/4)
+        u1 = u1 + skip2         # Skip connection from down2
+        
+        # Up2: (B,64,H/4,W/4) -> (B,32,H/2,W/2)
+        u2 = self.up2(u1)    # (B,32,H/2,W/2)
+        skip1 = self.skip1(d1)  # (B,32,H/2,W/2)
+        u2 = u2 + skip1         # Skip connection from down1
+        
+        # Up3 (No skip connection on final layer): (B,32,H/2,W/2) -> (B,16,H,W)
+        u3 = self.up3(u2)    # (B,16,H,W)
+        
+        # Heads: segmentation and depth
+        seg_logits = self.seg_head(u3)  # (B, num_classes, H, W)
+        depth = self.depth_head(u3)     # (B, 1, H, W)
+        depth = torch.sigmoid(depth)    # constrain values of depth to 0 or 1
+        depth = depth.squeeze(1)        # (B, H, W)
+        return seg_logits, depth
 
-        # TODO: replace with actual forward pass
-        logits = torch.randn(x.size(0), 3, x.size(2), x.size(3))
-        raw_depth = torch.rand(x.size(0), x.size(2), x.size(3))
-
-        return logits, raw_depth
 
     def predict(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
